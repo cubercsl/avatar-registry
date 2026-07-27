@@ -289,24 +289,30 @@ async function resizeToOutput(image: RawImage) {
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  const canvas = Buffer.alloc(targetSide * targetSide * 4);
-  const left = Math.floor((targetSide - info.width) / 2);
-  const top = Math.floor((targetSide - info.height) / 2);
+  cleanTransparentRgb(data);
+  return { data, width: info.width, height: info.height };
+}
 
-  for (let y = 0; y < info.height; y++) {
-    for (let x = 0; x < info.width; x++) {
-      const src = pixelOffset(info.width, x, y);
-      const dst = pixelOffset(targetSide, x + left, y + top);
-      canvas[dst] = data[src];
-      canvas[dst + 1] = data[src + 1];
-      canvas[dst + 2] = data[src + 2];
-      canvas[dst + 3] = data[src + 3];
+function padToSquare(image: RawImage): RawImage {
+  if (image.width === image.height) return image;
+
+  const side = Math.max(image.width, image.height);
+  const canvas = Buffer.alloc(side * side * 4);
+  const left = Math.floor((side - image.width) / 2);
+  const top = Math.floor((side - image.height) / 2);
+
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const src = pixelOffset(image.width, x, y);
+      const dst = pixelOffset(side, x + left, y + top);
+      canvas[dst] = image.data[src];
+      canvas[dst + 1] = image.data[src + 1];
+      canvas[dst + 2] = image.data[src + 2];
+      canvas[dst + 3] = image.data[src + 3];
     }
   }
 
-  cleanTransparentRgb(data);
-  cleanTransparentRgb(canvas);
-  return { data: canvas, width: targetSide, height: targetSide };
+  return { data: canvas, width: side, height: side };
 }
 
 function clipOutsideEllipse(image: RawImage) {
@@ -347,6 +353,10 @@ function clipOutsideEllipse(image: RawImage) {
 }
 
 async function writeExactWebp(image: RawImage, outputPath: string) {
+  if (image.width !== image.height) {
+    throw new Error(`refusing to write non-square avatar: ${image.width}x${image.height}`);
+  }
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avatar-import-'));
   const tempPng = path.join(tempDir, 'input.png');
 
@@ -389,16 +399,17 @@ async function processFile(file: fs.Dirent) {
 
   const cropped = extractWithPadding(image, bbox);
   const resized = await resizeToOutput(cropped);
-  const clippedPixels = strictCircularSeal ? clipOutsideEllipse(resized) : 0;
+  const squared = padToSquare(resized);
+  const clippedPixels = strictCircularSeal ? clipOutsideEllipse(squared) : 0;
 
-  await writeExactWebp(resized, outputPath);
+  await writeExactWebp(squared, outputPath);
 
   console.log(
     'Processed',
     file.name,
     '->',
     outputPath,
-    `${resized.width}x${resized.height}`,
+    `${squared.width}x${squared.height}`,
     `cleared=${clearedPixels}`,
     `filled=${filledPixels}`,
     `clipped=${clippedPixels}`,
