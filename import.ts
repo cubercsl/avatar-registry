@@ -17,7 +17,11 @@ const WORKING_MAX_SIDE = 2048;
 const SVG_MAX_DENSITY = 4096;
 const ALPHA_THRESHOLD = 8;
 const LIGHT_THRESHOLD = 245;
-const EDGE_COVERAGE_MIN = 0.72;
+const ENCLOSED_FILL_MIN_RATIO = 0.2;
+const EXISTING_WHITE_ARTWORK_MIN_RATIO = 0.01;
+const EXISTING_WHITE_ENCLOSED_FILL_MIN_RATIO = 0.25;
+const ENCLOSED_FILL_INSET_RATIO = 8 / 1024;
+const ENCLOSED_FILL_MIN_INSET = 2;
 const execFileAsync = promisify(execFile);
 
 type RawImage = {
@@ -108,6 +112,58 @@ function floodEdgeConnected(candidate: Uint8Array, width: number, height: number
   }
 }
 
+function exteriorSafetyBand(candidate: Uint8Array, width: number, height: number, radius: number) {
+  const protectedPixels = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  let head = 0;
+  let tail = 0;
+
+  const push = (index: number) => {
+    if (protectedPixels[index]) return;
+    protectedPixels[index] = 1;
+    queue[tail++] = index;
+  };
+
+  // Edge-connected transparency is the real exterior. The image boundary is
+  // also exterior, even when opaque artwork touches it; treating it as such
+  // is equivalent to padding a mask with black before eroding it.
+  for (let index = 0; index < candidate.length; index++) {
+    if (candidate[index] === 2) push(index);
+  }
+  for (let x = 0; x < width; x++) {
+    push(x);
+    push((height - 1) * width + x);
+  }
+  for (let y = 0; y < height; y++) {
+    push(y * width);
+    push(y * width + width - 1);
+  }
+
+  for (let distance = 0; distance < radius; distance++) {
+    const levelEnd = tail;
+    while (head < levelEnd) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+
+      const left = x > 0;
+      const right = x + 1 < width;
+      const top = y > 0;
+      const bottom = y + 1 < height;
+      if (left) push(index - 1);
+      if (right) push(index + 1);
+      if (top) push(index - width);
+      if (bottom) push(index + width);
+      if (left && top) push(index - width - 1);
+      if (right && top) push(index - width + 1);
+      if (left && bottom) push(index + width - 1);
+      if (right && bottom) push(index + width + 1);
+    }
+  }
+
+  return protectedPixels;
+}
+
 function clearEdgeLightBackground(image: RawImage) {
   const { data, width, height } = image;
   const candidate = new Uint8Array(width * height);
@@ -168,15 +224,6 @@ function outerAngleCoverage(image: RawImage, bbox: BBox) {
   return hits / angles;
 }
 
-function isCircularSeal(image: RawImage) {
-  const bbox = alphaBBox(image.data, image.width, image.height);
-  if (!bbox) return false;
-  const boxWidth = bbox.right - bbox.left;
-  const boxHeight = bbox.bottom - bbox.top;
-  const aspect = Math.min(boxWidth, boxHeight) / Math.max(boxWidth, boxHeight);
-  return aspect >= 0.9 && outerAngleCoverage(image, bbox) >= EDGE_COVERAGE_MIN;
-}
-
 function isStrictCircularSeal(image: RawImage) {
   const bbox = alphaBBox(image.data, image.width, image.height, 128);
   if (!bbox) return false;
@@ -189,20 +236,83 @@ function isStrictCircularSeal(image: RawImage) {
 function fillEnclosedTransparency(image: RawImage) {
   const { data, width, height } = image;
   const candidate = new Uint8Array(width * height);
+  let opaqueWhitePixels = 0;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (data[pixelOffset(width, x, y) + 3] <= ALPHA_THRESHOLD) {
+      const pixel = pixelOffset(width, x, y);
+      const alpha = data[pixel + 3];
+      if (alpha <= ALPHA_THRESHOLD) {
         candidate[y * width + x] = 1;
+      }
+      if (
+        alpha >= 240
+        && data[pixel] >= LIGHT_THRESHOLD
+        && data[pixel + 1] >= LIGHT_THRESHOLD
+        && data[pixel + 2] >= LIGHT_THRESHOLD
+      ) {
+        opaqueWhitePixels++;
       }
     }
   }
 
   floodEdgeConnected(candidate, width, height);
 
+  const bbox = alphaBBox(data, width, height);
+  if (!bbox) return 0;
+  const bboxArea = (bbox.right - bbox.left) * (bbox.bottom - bbox.top);
+
+  const componentQueue = new Int32Array(width * height);
+  let largestComponent = 0;
+  let enclosedPixels = 0;
+
+  for (let start = 0; start < candidate.length; start++) {
+    if (candidate[start] !== 1) continue;
+
+    let head = 0;
+    let tail = 0;
+    candidate[start] = 3;
+    componentQueue[tail++] = start;
+
+    const push = (index: number) => {
+      if (candidate[index] !== 1) return;
+      candidate[index] = 3;
+      componentQueue[tail++] = index;
+    };
+
+    while (head < tail) {
+      const index = componentQueue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+
+      if (x > 0) push(index - 1);
+      if (x + 1 < width) push(index + 1);
+      if (y > 0) push(index - width);
+      if (y + 1 < height) push(index + width);
+    }
+
+    largestComponent = Math.max(largestComponent, tail);
+    enclosedPixels += tail;
+  }
+
+  const hasExistingWhiteArtwork = opaqueWhitePixels >= bboxArea * EXISTING_WHITE_ARTWORK_MIN_RATIO;
+  const minimumFillRatio = hasExistingWhiteArtwork
+    ? EXISTING_WHITE_ENCLOSED_FILL_MIN_RATIO
+    : ENCLOSED_FILL_MIN_RATIO;
+  if (
+    largestComponent < bboxArea * minimumFillRatio
+    && enclosedPixels < bboxArea * minimumFillRatio
+  ) return 0;
+
+  const fillInset = Math.max(
+    ENCLOSED_FILL_MIN_INSET,
+    Math.round(Math.max(width, height) * ENCLOSED_FILL_INSET_RATIO),
+  );
+  const protectedPixels = exteriorSafetyBand(candidate, width, height, fillInset);
+
   let changed = 0;
   for (let index = 0; index < candidate.length; index++) {
-    if (candidate[index] !== 1) continue;
+    if (candidate[index] !== 3 || protectedPixels[index]) continue;
     const pixel = index * 4;
     data[pixel] = 255;
     data[pixel + 1] = 255;
@@ -352,6 +462,80 @@ function clipOutsideEllipse(image: RawImage) {
   return changed;
 }
 
+function removeWhiteMatteFromEllipseEdge(image: RawImage) {
+  const bbox = alphaBBox(image.data, image.width, image.height, 128);
+  if (!bbox) return 0;
+
+  const source = Buffer.from(image.data);
+  const cx = (bbox.left + bbox.right - 1) / 2;
+  const cy = (bbox.top + bbox.bottom - 1) / 2;
+  const rx = (bbox.right - bbox.left) / 2;
+  const ry = (bbox.bottom - bbox.top) / 2;
+  const referenceSteps = 8;
+  let changed = 0;
+
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const dx = (x - cx) / rx;
+      const dy = (y - cy) / ry;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance < 0.98) continue;
+
+      const index = pixelOffset(image.width, x, y);
+      const alpha = source[index + 3];
+      if (alpha === 0) continue;
+
+      const angle = Math.atan2(y - cy, x - cx);
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      let reference = -1;
+      let bestWhiteDistance = 0;
+
+      for (let step = 0; step <= referenceSteps; step++) {
+        const radius = 0.94 + 0.04 * step / referenceSteps;
+        const sampleX = Math.round(cx + cos * rx * radius);
+        const sampleY = Math.round(cy + sin * ry * radius);
+        if (sampleX < 0 || sampleX >= image.width || sampleY < 0 || sampleY >= image.height) continue;
+
+        const sample = pixelOffset(image.width, sampleX, sampleY);
+        if (source[sample + 3] < 128) continue;
+        const redDistance = 255 - source[sample];
+        const greenDistance = 255 - source[sample + 1];
+        const blueDistance = 255 - source[sample + 2];
+        const whiteDistance = redDistance * redDistance
+          + greenDistance * greenDistance
+          + blueDistance * blueDistance;
+        if (whiteDistance <= bestWhiteDistance) continue;
+
+        bestWhiteDistance = whiteDistance;
+        reference = sample;
+      }
+
+      if (reference < 0 || bestWhiteDistance < 32 * 32) continue;
+
+      const estimates: number[] = [];
+      for (let channel = 0; channel < 3; channel++) {
+        const denominator = 255 - source[reference + channel];
+        if (denominator < 16) continue;
+        estimates.push(Math.max(0, Math.min(1, (255 - source[index + channel]) / denominator)));
+      }
+      if (!estimates.length) continue;
+
+      estimates.sort((a, b) => a - b);
+      const matteAlpha = estimates[Math.floor(estimates.length / 2)];
+      const unmattedAlpha = Math.round(alpha * matteAlpha);
+
+      for (let channel = 0; channel < 3; channel++) {
+        image.data[index + channel] = unmattedAlpha ? source[reference + channel] : 0;
+      }
+      image.data[index + 3] = unmattedAlpha;
+      changed++;
+    }
+  }
+
+  return changed;
+}
+
 async function writeExactWebp(image: RawImage, outputPath: string) {
   if (image.width !== image.height) {
     throw new Error(`refusing to write non-square avatar: ${image.width}x${image.height}`);
@@ -391,7 +575,7 @@ async function processFile(file: fs.Dirent) {
   const image = await loadWorkingImage(inputPath);
   const strictCircularSeal = isStrictCircularSeal(image);
   const clearedPixels = clearEdgeLightBackground(image);
-  const filledPixels = isCircularSeal(image) ? fillEnclosedTransparency(image) : 0;
+  const filledPixels = fillEnclosedTransparency(image);
   cleanTransparentRgb(image.data);
 
   const bbox = alphaBBox(image.data, image.width, image.height);
@@ -401,6 +585,10 @@ async function processFile(file: fs.Dirent) {
   const resized = await resizeToOutput(cropped);
   const squared = padToSquare(resized);
   const clippedPixels = strictCircularSeal ? clipOutsideEllipse(squared) : 0;
+  const unmattedPixels = strictCircularSeal && clearedPixels
+    ? removeWhiteMatteFromEllipseEdge(squared)
+    : 0;
+  cleanTransparentRgb(squared.data);
 
   await writeExactWebp(squared, outputPath);
 
@@ -413,6 +601,7 @@ async function processFile(file: fs.Dirent) {
     `cleared=${clearedPixels}`,
     `filled=${filledPixels}`,
     `clipped=${clippedPixels}`,
+    `unmatted=${unmattedPixels}`,
   );
 }
 
