@@ -3,98 +3,104 @@ import os from 'node:os';
 import path from 'node:path';
 import PQueue from 'p-queue';
 import sharp from 'sharp';
-import { AVATAR_REGISTRY_PATH, loadAvatarRegistry } from './src/avatarRegistry';
+import { type AvatarRegistryEntry, loadAvatarRegistry } from './src/avatarRegistry';
 
 const AVATAR_DIR = 'avatars';
 const OUTPUT_DIR = 'png';
-const BUILD_DEPENDENCIES = [
-  'topng.ts',
-  'src/avatarRegistry.ts',
-  AVATAR_REGISTRY_PATH,
-  'package.json',
-  'yarn.lock',
-];
+
+type OutputMode = 'name' | 'id';
 
 type Conversion = {
   source: string;
   target: string;
+  links: string[];
 };
 
-const parseForceFlag = () => {
+function parseArgs(): { mode: OutputMode; force: boolean } {
   const args = process.argv.slice(2);
-  if (!args.length) return false;
-  if (args.length === 1 && args[0] === '--force') return true;
-  throw new Error(`Usage: yarn topng [--force]`);
-};
+  const force = args.includes('--force');
+  const positional = args.filter(arg => arg !== '--force');
+  const mode = positional[0] ?? 'name';
+  if (positional.length > 1 || (mode !== 'name' && mode !== 'id')) {
+    throw new Error('Usage: yarn topng:name [--force] | yarn topng:id [--force]');
+  }
+  return { mode, force };
+}
 
-const listConversions = (): Conversion[] => {
-  const registry = loadAvatarRegistry();
-  const registryByFilename = new Map(registry.map(entry => [entry.filename, entry]));
-  const unregisteredFiles: string[] = [];
-  const conversions = fs
+async function main() {
+  const { mode, force } = parseArgs();
+  const registryByFilename = new Map<string, AvatarRegistryEntry[]>();
+  for (const entry of loadAvatarRegistry()) {
+    const entries = registryByFilename.get(entry.filename) ?? [];
+    entries.push(entry);
+    registryByFilename.set(entry.filename, entries);
+  }
+  const files = fs
     .readdirSync(AVATAR_DIR, { withFileTypes: true })
-    .filter(entry => entry.isFile() && path.extname(entry.name) === '.webp')
-    .flatMap(entry => {
-      const filename = path.parse(entry.name).name;
-      const registryEntry = registryByFilename.get(filename);
-      if (!registryEntry) {
-        unregisteredFiles.push(entry.name);
-        return [];
-      }
-      return [{
-        source: path.join(AVATAR_DIR, entry.name),
-        target: path.join(OUTPUT_DIR, `${registryEntry.id}.png`),
-      }];
-    });
-
-  if (unregisteredFiles.length) {
-    console.warn(
-      `PNG build warning: ${unregisteredFiles.length} WebP files have no registry entry and will be skipped:\n${unregisteredFiles
-        .map(file => `- ${file}`)
+    .filter(entry => entry.isFile() && path.extname(entry.name) === '.webp');
+  const missing = files.filter(file => !registryByFilename.has(path.parse(file.name).name));
+  if (missing.length) {
+    throw new Error(
+      `Avatar registry error: ${missing.length} WebP files have no registry entry:\n${missing
+        .map(file => `- ${file.name}`)
         .join('\n')}`,
     );
   }
 
-  return conversions;
-};
-
-const latestBuildDependencyMtime = () => Math.max(
-  ...BUILD_DEPENDENCIES.map(file => fs.statSync(file).mtimeMs),
-);
-
-const needsBuild = (conversion: Conversion, force: boolean, dependencyMtime: number) => {
-  if (force || !fs.existsSync(conversion.target)) return true;
-  const targetMtime = fs.statSync(conversion.target).mtimeMs;
-  return fs.statSync(conversion.source).mtimeMs > targetMtime || dependencyMtime > targetMtime;
-};
-
-const main = async () => {
-  const force = parseForceFlag();
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-
-  const conversions = listConversions();
-  const dependencyMtime = latestBuildDependencyMtime();
-  const pending = conversions.filter(conversion => needsBuild(conversion, force, dependencyMtime));
-  const skipped = conversions.length - pending.length;
+  const conversions: Conversion[] = files.map(file => {
+    const filename = path.parse(file.name).name;
+    const source = path.join(AVATAR_DIR, file.name);
+    const targetNames = mode === 'id'
+      ? registryByFilename.get(filename)!.map(entry => entry.id)
+      : [filename];
+    return {
+      source,
+      target: path.join(OUTPUT_DIR, `${targetNames[0]}.png`),
+      links: targetNames.slice(1).map(name => path.join(OUTPUT_DIR, `${name}.png`)),
+    };
+  });
+  for (const { target } of conversions) {
+    if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) fs.unlinkSync(target);
+  }
+  const pending = conversions.filter(({ source, target }) => force
+    || !fs.existsSync(target)
+    || fs.statSync(source).mtimeMs > fs.statSync(target).mtimeMs);
   const queue = new PQueue({ concurrency: os.availableParallelism() });
-  const results = await Promise.allSettled(
-    pending.map(conversion => queue.add(async () => {
-      console.log('Converting', conversion.source, '->', conversion.target);
-      await sharp(conversion.source).toFormat('png', { quality: 80 }).toFile(conversion.target);
-    })),
-  );
-  const failures = results.flatMap((result, index) => result.status === 'rejected'
-    ? [new Error(`${pending[index].source} -> ${pending[index].target}`, { cause: result.reason })]
-    : []);
+  const results = await Promise.allSettled(pending.map(({ source, target }) => queue.add(async () => {
+    try {
+      console.log('Converting', source, '->', target);
+      await sharp(source).toFormat('png', { quality: 80 }).toFile(target);
+    } catch (cause) {
+      throw new Error(`${source} -> ${target}`, { cause });
+    }
+  })));
+  const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+
+  let linked = 0;
+  if (!failures.length) {
+    for (const { target, links } of conversions) {
+      for (const link of links) {
+        const linkTarget = path.basename(target);
+        try {
+          const stat = fs.lstatSync(link);
+          if (stat.isSymbolicLink() && fs.readlinkSync(link) === linkTarget) continue;
+          fs.unlinkSync(link);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        fs.symlinkSync(linkTarget, link);
+        linked++;
+      }
+    }
+  }
 
   console.log(
-    `PNG build: ${pending.length - failures.length} converted, ${skipped} up to date, ${failures.length} failed.`,
+    `PNG build (${mode}): ${pending.length - failures.length} converted, `
+    + `${conversions.length - pending.length} up to date, ${linked} linked, ${failures.length} failed.`,
   );
-
-  if (failures.length) {
-    throw new AggregateError(failures, `Failed to convert ${failures.length} avatar(s)`);
-  }
-};
+  if (failures.length) throw new AggregateError(failures, 'PNG conversion failed');
+}
 
 main().catch(error => {
   console.error(error);
