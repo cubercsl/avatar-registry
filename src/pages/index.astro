@@ -1,6 +1,7 @@
 ---
 import { join } from 'node:path';
 import sharp from 'sharp';
+import { loadAvatarRegistry } from '../avatarRegistry';
 import LogoRegistry, { type Logo } from '../components/LogoRegistry';
 
 const logoModules = import.meta.glob<string>('../../avatars/*.webp', {
@@ -14,13 +15,28 @@ const collator = new Intl.Collator('zh-Hans-CN', {
   sensitivity: 'base',
 });
 
+const avatarRegistry = await loadAvatarRegistry();
+const registryByName = new Map(avatarRegistry.map(entry => [entry.name, entry]));
+const logoFiles = Object.entries(logoModules).map(([modulePath, src]) => {
+  const file = modulePath.split('/').pop() ?? '';
+  const name = file.replace(/\.webp$/i, '');
+  return { file, name, registryEntry: registryByName.get(name), src };
+});
+const unregisteredLogos = logoFiles.filter(({ registryEntry }) => !registryEntry);
+if (unregisteredLogos.length) {
+  console.warn(
+    `Avatar files warning: ${unregisteredLogos.length} WebP files have no registry entry and will be shown without ID metadata:\n${unregisteredLogos
+      .map(({ file }) => `- ${file}`)
+      .join('\n')}`,
+  );
+}
 const logos: Logo[] = (
   await Promise.all(
-    Object.entries(logoModules).map(async ([path, src]) => {
-      const file = path.split('/').pop() ?? '';
-      const name = file.replace(/\.webp$/i, '');
+    logoFiles.map(async ({ file, name, registryEntry, src }) => {
       const metadata = await sharp(join(process.cwd(), 'avatars', file)).metadata();
       return {
+        id: registryEntry?.id ?? null,
+        icpcId: registryEntry && /^\d+$/.test(registryEntry.id) ? registryEntry.id : null,
         name,
         src,
         file,
@@ -30,6 +46,16 @@ const logos: Logo[] = (
     }),
   )
 ).sort((left, right) => collator.compare(left.name, right.name));
+
+const logoIds = new Set(logos.flatMap(({ id }) => id ? [id] : []));
+const missingLogos = avatarRegistry.filter(({ id }) => !logoIds.has(id));
+if (missingLogos.length) {
+  console.warn(
+    `Avatar registry warning: ${missingLogos.length} entries have no WebP and will not be shown:\n${missingLogos
+      .map(({ id, name }) => `- ${id}: ${name}`)
+      .join('\n')}`,
+  );
+}
 ---
 
 <!doctype html>

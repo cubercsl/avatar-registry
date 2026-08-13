@@ -2,6 +2,8 @@ import { CircleHelp, Moon, Sun, Upload, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 export type Logo = {
+  id: string | null;
+  icpcId: string | null;
   name: string;
   src: string;
   file: string;
@@ -39,6 +41,21 @@ const formatLogoSize = (logo: Logo) => {
   if (!logo.width || !logo.height) return '未知尺寸';
   return `${logo.width} x ${logo.height}`;
 };
+
+function IcpcBadge({ icpcId, focusable = false }: { icpcId: string; focusable?: boolean }) {
+  const tooltip = `ICPC INST ID: ${icpcId}`;
+
+  return (
+    <span
+      className="icpc-badge"
+      data-tooltip={tooltip}
+      aria-label={tooltip}
+      tabIndex={focusable ? 0 : undefined}
+    >
+      ICPC
+    </span>
+  );
+}
 
 function LogoSample({ logo, dark = false }: { logo: Logo; dark?: boolean }) {
   return (
@@ -94,6 +111,7 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
   const [isUploadInfoOpen, setIsUploadInfoOpen] = useState(true);
   const [copyStatus, setCopyStatus] = useState<CopyStatus>('idle');
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const detailCloseButtonRef = useRef<HTMLButtonElement>(null);
   const uploadDialogRef = useRef<HTMLDialogElement>(null);
   const isInitialUploadInfoRef = useRef(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -103,8 +121,8 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
     if (!normalizedQuery) return logos;
     return logos.filter((logo) => {
       const name = normalize(logo.name);
-      const file = normalize(logo.file);
-      return name.includes(normalizedQuery) || file.includes(normalizedQuery);
+      const id = logo.id ? normalize(logo.id) : '';
+      return name.includes(normalizedQuery) || id.includes(normalizedQuery);
     });
   }, [logos, query]);
 
@@ -141,6 +159,7 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
 
     if (selectedLogo) {
       if (!dialog.open) dialog.showModal();
+      detailCloseButtonRef.current?.focus();
       return;
     }
 
@@ -291,9 +310,10 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
               className="logo-card"
               type="button"
               key={logo.file}
-              aria-label={`查看 ${logo.name} logo`}
+              aria-label={`查看 ${logo.name} logo${logo.icpcId ? `，ICPC INST ID: ${logo.icpcId}` : ''}`}
               onClick={() => setSelectedLogo(logo)}
             >
+              {logo.icpcId && <IcpcBadge icpcId={logo.icpcId} />}
               <span className="logo-stage">
                 <img className="logo-image" src={logo.src} alt="" loading="lazy" decoding="async" />
               </span>
@@ -325,7 +345,10 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
             <header className="detail-header">
               <div className="detail-title-block">
                 <p className="detail-file">Logo Detail - {selectedLogo.file}</p>
-                <h2 id="detail-title">{selectedLogo.name}</h2>
+                <div className="detail-title-row">
+                  <h2 id="detail-title">{selectedLogo.name}</h2>
+                  {selectedLogo.icpcId && <IcpcBadge icpcId={selectedLogo.icpcId} focusable />}
+                </div>
                 {hasLowLogoResolution(selectedLogo) && (
                   <button className="logo-quality-warning" type="button" onClick={openUploadInfo}>
                     当前 logo 尺寸 {formatLogoSize(selectedLogo)} 不够清晰，技术组建议提供新 logo。
@@ -345,7 +368,7 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
                 >
                   <Upload className="theme-icon" aria-hidden="true" />
                 </button>
-                <button className="close-button" type="button" aria-label="关闭详情" onClick={closeDetail}>
+                <button ref={detailCloseButtonRef} className="close-button" type="button" aria-label="关闭详情" onClick={closeDetail}>
                   <X className="theme-icon" aria-hidden="true" />
                 </button>
               </div>
@@ -806,6 +829,7 @@ h1 {
 }
 
 .logo-card {
+  position: relative;
   display: grid;
   grid-template-rows: 124px 44px;
   gap: 10px;
@@ -824,8 +848,71 @@ h1 {
     box-shadow 160ms ease;
 }
 
+.icpc-badge {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  min-height: 24px;
+  padding: 3px 7px;
+  color: #ffffff;
+  background: var(--accent);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.2);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  line-height: 1;
+}
+
+.logo-card > .icpc-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+.icpc-badge::after {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 40;
+  width: max-content;
+  padding: 7px 9px;
+  color: #ffffff;
+  background: #111827;
+  border-radius: 6px;
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: normal;
+  line-height: 1.2;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  white-space: nowrap;
+}
+
+.icpc-badge:hover::after,
+.icpc-badge:focus-visible::after,
+.logo-card:focus-visible > .icpc-badge::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.icpc-badge:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .logo-card:hover,
 .logo-card:focus-visible {
+  z-index: 3;
   border-color: var(--accent-line);
   box-shadow: var(--card-shadow-hover);
   transform: translateY(-2px);
@@ -935,6 +1022,24 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
+}
+
+.detail-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-title-row h2 {
+  margin: 0;
+}
+
+.detail-title-row .icpc-badge::after {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 7px);
+  left: 0;
 }
 
 .upload-dialog {
