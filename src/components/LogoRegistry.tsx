@@ -5,6 +5,7 @@ export type Logo = {
   id: string | null;
   icpcId: string | null;
   name: string;
+  searchNames: string[];
   src: string;
   file: string;
   width: number | null;
@@ -120,9 +121,9 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
     const normalizedQuery = normalize(query);
     if (!normalizedQuery) return logos;
     return logos.filter((logo) => {
-      const name = normalize(logo.name);
       const id = logo.id ? normalize(logo.id) : '';
-      return name.includes(normalizedQuery) || id.includes(normalizedQuery);
+      return id.includes(normalizedQuery)
+        || logo.searchNames.some(name => normalize(name).includes(normalizedQuery));
     });
   }, [logos, query]);
 

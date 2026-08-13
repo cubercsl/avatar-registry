@@ -45,6 +45,7 @@ const logos: Logo[] = avatarRegistry.flatMap((entry) => {
     id: entry.id,
     icpcId: /^\d+$/.test(entry.id) ? entry.id : null,
     name: entry.name,
+    searchNames: [entry.filename, entry.name, entry.englishName].filter(Boolean),
     src: logo.src,
     file: logo.file,
     width: logo.width,
