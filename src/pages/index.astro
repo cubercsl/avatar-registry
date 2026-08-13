@@ -1,14 +1,10 @@
 ---
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { loadAvatarRegistry } from '../avatarRegistry';
 import LogoRegistry, { type Logo } from '../components/LogoRegistry';
-
-const logoModules = import.meta.glob<string>('../../avatars/*.webp', {
-  eager: true,
-  import: 'default',
-  query: '?url',
-});
 
 const collator = new Intl.Collator('zh-Hans-CN', {
   numeric: true,
@@ -17,18 +13,22 @@ const collator = new Intl.Collator('zh-Hans-CN', {
 
 const avatarRegistry = loadAvatarRegistry();
 const registeredFilenames = new Set(avatarRegistry.map(entry => entry.filename));
-const logoFiles = await Promise.all(Object.entries(logoModules).map(async ([modulePath, src]) => {
-  const file = modulePath.split('/').pop() ?? '';
-  const filename = file.replace(/\.webp$/i, '');
-  const metadata = await sharp(join(process.cwd(), 'avatars', file)).metadata();
-  return {
-    file,
-    filename,
-    src,
-    width: metadata.width ?? null,
-    height: metadata.height ?? null,
-  };
-}));
+const logoFiles = await Promise.all(fs
+  .readdirSync('avatars', { withFileTypes: true })
+  .filter(entry => entry.isFile() && entry.name.endsWith('.webp'))
+  .map(async ({ name: file }) => {
+    const filename = file.replace(/\.webp$/i, '');
+    const contents = await fs.promises.readFile(join(process.cwd(), 'avatars', file));
+    const metadata = await sharp(contents).metadata();
+    const buildHash = createHash('sha256').update(contents).digest('hex').slice(0, 12);
+    return {
+      file,
+      filename,
+      src: `/avatars/${encodeURIComponent(file)}?build=${buildHash}`,
+      width: metadata.width ?? null,
+      height: metadata.height ?? null,
+    };
+  }));
 const unregisteredLogos = logoFiles.filter(({ filename }) => !registeredFilenames.has(filename));
 if (unregisteredLogos.length) {
   throw new Error(
