@@ -37,6 +37,12 @@ type BBox = {
   bottom: number;
 };
 
+type AlphaComponent = {
+  bbox: BBox;
+  size: number;
+  total: number;
+};
+
 function cleanName(filename: string) {
   return path.parse(filename).name.replace(/[（）]/g, '').replace(/^\d+ ?/, '');
 }
@@ -192,45 +198,98 @@ function clearEdgeLightBackground(image: RawImage) {
   return changed;
 }
 
-function outerAngleCoverage(image: RawImage, bbox: BBox) {
+function dominantAlphaComponent(image: RawImage, threshold = 128): AlphaComponent | null {
   const { data, width, height } = image;
+  const visited = new Uint8Array(width * height);
+  const componentQueue = new Int32Array(width * height);
+  let total = 0;
+  let largestSize = 0;
+  let largestBBox: BBox | null = null;
+
+  for (let index = 0; index < visited.length; index++) {
+    if (data[index * 4 + 3] > threshold) total++;
+  }
+
+  for (let start = 0; start < visited.length; start++) {
+    if (visited[start] || data[start * 4 + 3] <= threshold) continue;
+
+    let head = 0;
+    let tail = 0;
+    let left = width;
+    let top = height;
+    let right = -1;
+    let bottom = -1;
+    visited[start] = 1;
+    componentQueue[tail++] = start;
+
+    const push = (index: number) => {
+      if (visited[index] || data[index * 4 + 3] <= threshold) return;
+      visited[index] = 1;
+      componentQueue[tail++] = index;
+    };
+
+    while (head < tail) {
+      const index = componentQueue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+
+      if (x > 0) push(index - 1);
+      if (x + 1 < width) push(index + 1);
+      if (y > 0) push(index - width);
+      if (y + 1 < height) push(index + width);
+    }
+
+    if (tail <= largestSize) continue;
+    largestSize = tail;
+    largestBBox = { left, top, right: right + 1, bottom: bottom + 1 };
+  }
+
+  if (!largestBBox) return null;
+  return { bbox: largestBBox, size: largestSize, total };
+}
+
+function strictEllipseSealBBox(image: RawImage) {
+  const component = dominantAlphaComponent(image);
+  if (!component) return null;
+
+  const { bbox } = component;
   const boxWidth = bbox.right - bbox.left;
   const boxHeight = bbox.bottom - bbox.top;
+  const aspect = Math.min(boxWidth, boxHeight) / Math.max(boxWidth, boxHeight);
+  if (aspect < 0.55 || component.size / component.total < 0.98) {
+    return null;
+  }
+
   const cx = (bbox.left + bbox.right - 1) / 2;
   const cy = (bbox.top + bbox.bottom - 1) / 2;
   const rx = boxWidth / 2;
   const ry = boxHeight / 2;
-  let hits = 0;
-  const angles = 360;
+  let matchingAngles = 0;
 
-  for (let degree = 0; degree < angles; degree++) {
+  for (let degree = 0; degree < 360; degree++) {
     const theta = degree * Math.PI / 180;
     const cos = Math.cos(theta);
     const sin = Math.sin(theta);
-    let hit = false;
-    for (let percent = 72; percent <= 104; percent += 2) {
+    let outerRadius = 0;
+
+    for (let percent = 80; percent <= 106; percent++) {
       const radius = percent / 100;
       const x = Math.round(cx + cos * rx * radius);
       const y = Math.round(cy + sin * ry * radius);
-      if (x < 0 || x >= width || y < 0 || y >= height) continue;
-      if (data[pixelOffset(width, x, y) + 3] > ALPHA_THRESHOLD) {
-        hit = true;
-        break;
+      if (x < 0 || x >= image.width || y < 0 || y >= image.height) continue;
+      if (image.data[pixelOffset(image.width, x, y) + 3] > 128) {
+        outerRadius = radius;
       }
     }
-    if (hit) hits++;
+
+    if (outerRadius >= 0.97 && outerRadius <= 1.03) matchingAngles++;
   }
 
-  return hits / angles;
-}
-
-function isStrictCircularSeal(image: RawImage) {
-  const bbox = alphaBBox(image.data, image.width, image.height, 128);
-  if (!bbox) return false;
-  const boxWidth = bbox.right - bbox.left;
-  const boxHeight = bbox.bottom - bbox.top;
-  const aspect = Math.min(boxWidth, boxHeight) / Math.max(boxWidth, boxHeight);
-  return aspect >= 0.97 && outerAngleCoverage(image, bbox) >= 0.9;
+  return matchingAngles >= 342 ? bbox : null;
 }
 
 function fillEnclosedTransparency(image: RawImage) {
@@ -425,14 +484,14 @@ function padToSquare(image: RawImage): RawImage {
   return { data: canvas, width: side, height: side };
 }
 
-function clipOutsideEllipse(image: RawImage) {
-  const bbox = alphaBBox(image.data, image.width, image.height, 128);
+function clipOutsideEllipse(image: RawImage, explicitBBox?: BBox, inset = 0) {
+  const bbox = explicitBBox || alphaBBox(image.data, image.width, image.height, 128);
   if (!bbox) return 0;
 
   const cx = (bbox.left + bbox.right - 1) / 2;
   const cy = (bbox.top + bbox.bottom - 1) / 2;
-  const rx = (bbox.right - bbox.left) / 2 + 0.5;
-  const ry = (bbox.bottom - bbox.top) / 2 + 0.5;
+  const rx = (bbox.right - bbox.left) / 2 + 0.5 - inset;
+  const ry = (bbox.bottom - bbox.top) / 2 + 0.5 - inset;
   const edgeScale = Math.min(rx, ry);
   let changed = 0;
 
@@ -455,80 +514,6 @@ function clipOutsideEllipse(image: RawImage) {
         image.data[index + 1] = 0;
         image.data[index + 2] = 0;
       }
-      changed++;
-    }
-  }
-
-  return changed;
-}
-
-function removeWhiteMatteFromEllipseEdge(image: RawImage) {
-  const bbox = alphaBBox(image.data, image.width, image.height, 128);
-  if (!bbox) return 0;
-
-  const source = Buffer.from(image.data);
-  const cx = (bbox.left + bbox.right - 1) / 2;
-  const cy = (bbox.top + bbox.bottom - 1) / 2;
-  const rx = (bbox.right - bbox.left) / 2;
-  const ry = (bbox.bottom - bbox.top) / 2;
-  const referenceSteps = 8;
-  let changed = 0;
-
-  for (let y = 0; y < image.height; y++) {
-    for (let x = 0; x < image.width; x++) {
-      const dx = (x - cx) / rx;
-      const dy = (y - cy) / ry;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      if (distance < 0.98) continue;
-
-      const index = pixelOffset(image.width, x, y);
-      const alpha = source[index + 3];
-      if (alpha === 0) continue;
-
-      const angle = Math.atan2(y - cy, x - cx);
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      let reference = -1;
-      let bestWhiteDistance = 0;
-
-      for (let step = 0; step <= referenceSteps; step++) {
-        const radius = 0.94 + 0.04 * step / referenceSteps;
-        const sampleX = Math.round(cx + cos * rx * radius);
-        const sampleY = Math.round(cy + sin * ry * radius);
-        if (sampleX < 0 || sampleX >= image.width || sampleY < 0 || sampleY >= image.height) continue;
-
-        const sample = pixelOffset(image.width, sampleX, sampleY);
-        if (source[sample + 3] < 128) continue;
-        const redDistance = 255 - source[sample];
-        const greenDistance = 255 - source[sample + 1];
-        const blueDistance = 255 - source[sample + 2];
-        const whiteDistance = redDistance * redDistance
-          + greenDistance * greenDistance
-          + blueDistance * blueDistance;
-        if (whiteDistance <= bestWhiteDistance) continue;
-
-        bestWhiteDistance = whiteDistance;
-        reference = sample;
-      }
-
-      if (reference < 0 || bestWhiteDistance < 32 * 32) continue;
-
-      const estimates: number[] = [];
-      for (let channel = 0; channel < 3; channel++) {
-        const denominator = 255 - source[reference + channel];
-        if (denominator < 16) continue;
-        estimates.push(Math.max(0, Math.min(1, (255 - source[index + channel]) / denominator)));
-      }
-      if (!estimates.length) continue;
-
-      estimates.sort((a, b) => a - b);
-      const matteAlpha = estimates[Math.floor(estimates.length / 2)];
-      const unmattedAlpha = Math.round(alpha * matteAlpha);
-
-      for (let channel = 0; channel < 3; channel++) {
-        image.data[index + channel] = unmattedAlpha ? source[reference + channel] : 0;
-      }
-      image.data[index + 3] = unmattedAlpha;
       changed++;
     }
   }
@@ -573,9 +558,23 @@ async function processFile(file: fs.Dirent) {
   const inputPath = path.join(IMPORT_DIR, file.name);
   const outputPath = path.join(AVATAR_DIR, `${name}.webp`);
   const image = await loadWorkingImage(inputPath);
-  const strictCircularSeal = isStrictCircularSeal(image);
   const clearedPixels = clearEdgeLightBackground(image);
   const filledPixels = fillEnclosedTransparency(image);
+  const ellipseSealBBox = strictEllipseSealBBox(image);
+  const ellipseSealInset = ellipseSealBBox
+    ? Math.max(
+      1,
+      Math.round(
+        Math.min(
+          ellipseSealBBox.right - ellipseSealBBox.left,
+          ellipseSealBBox.bottom - ellipseSealBBox.top,
+        ) * 0.008,
+      ),
+    )
+    : 0;
+  const clippedPixels = ellipseSealBBox
+    ? clipOutsideEllipse(image, ellipseSealBBox, ellipseSealInset)
+    : 0;
   cleanTransparentRgb(image.data);
 
   const bbox = alphaBBox(image.data, image.width, image.height);
@@ -584,10 +583,6 @@ async function processFile(file: fs.Dirent) {
   const cropped = extractWithPadding(image, bbox);
   const resized = await resizeToOutput(cropped);
   const squared = padToSquare(resized);
-  const clippedPixels = strictCircularSeal ? clipOutsideEllipse(squared) : 0;
-  const unmattedPixels = strictCircularSeal && clearedPixels
-    ? removeWhiteMatteFromEllipseEdge(squared)
-    : 0;
   cleanTransparentRgb(squared.data);
 
   await writeExactWebp(squared, outputPath);
@@ -601,7 +596,6 @@ async function processFile(file: fs.Dirent) {
     `cleared=${clearedPixels}`,
     `filled=${filledPixels}`,
     `clipped=${clippedPixels}`,
-    `unmatted=${unmattedPixels}`,
   );
 }
 
