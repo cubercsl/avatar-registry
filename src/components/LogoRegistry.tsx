@@ -309,7 +309,7 @@ export default function LogoRegistry({ logos }: LogoRegistryProps) {
             <button
               className="logo-card"
               type="button"
-              key={logo.file}
+              key={logo.id ?? logo.file}
               aria-label={`查看 ${logo.name} logo${logo.icpcId ? `，ICPC INST ID: ${logo.icpcId}` : ''}`}
               onClick={() => setSelectedLogo(logo)}
             >

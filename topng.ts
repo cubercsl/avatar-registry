@@ -27,16 +27,16 @@ const parseForceFlag = () => {
   throw new Error(`Usage: yarn topng [--force]`);
 };
 
-const listConversions = async (): Promise<Conversion[]> => {
-  const registry = await loadAvatarRegistry();
-  const registryByName = new Map(registry.map(entry => [entry.name, entry]));
+const listConversions = (): Conversion[] => {
+  const registry = loadAvatarRegistry();
+  const registryByFilename = new Map(registry.map(entry => [entry.filename, entry]));
   const unregisteredFiles: string[] = [];
   const conversions = fs
     .readdirSync(AVATAR_DIR, { withFileTypes: true })
     .filter(entry => entry.isFile() && path.extname(entry.name) === '.webp')
     .flatMap(entry => {
-      const name = path.parse(entry.name).name;
-      const registryEntry = registryByName.get(name);
+      const filename = path.parse(entry.name).name;
+      const registryEntry = registryByFilename.get(filename);
       if (!registryEntry) {
         unregisteredFiles.push(entry.name);
         return [];
@@ -72,7 +72,7 @@ const main = async () => {
   const force = parseForceFlag();
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const conversions = await listConversions();
+  const conversions = listConversions();
   const dependencyMtime = latestBuildDependencyMtime();
   const pending = conversions.filter(conversion => needsBuild(conversion, force, dependencyMtime));
   const skipped = conversions.length - pending.length;

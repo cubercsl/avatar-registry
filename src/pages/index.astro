@@ -15,40 +15,44 @@ const collator = new Intl.Collator('zh-Hans-CN', {
   sensitivity: 'base',
 });
 
-const avatarRegistry = await loadAvatarRegistry();
-const registryByName = new Map(avatarRegistry.map(entry => [entry.name, entry]));
-const logoFiles = Object.entries(logoModules).map(([modulePath, src]) => {
+const avatarRegistry = loadAvatarRegistry();
+const registeredFilenames = new Set(avatarRegistry.map(entry => entry.filename));
+const logoFiles = await Promise.all(Object.entries(logoModules).map(async ([modulePath, src]) => {
   const file = modulePath.split('/').pop() ?? '';
-  const name = file.replace(/\.webp$/i, '');
-  return { file, name, registryEntry: registryByName.get(name), src };
-});
-const unregisteredLogos = logoFiles.filter(({ registryEntry }) => !registryEntry);
+  const filename = file.replace(/\.webp$/i, '');
+  const metadata = await sharp(join(process.cwd(), 'avatars', file)).metadata();
+  return {
+    file,
+    filename,
+    src,
+    width: metadata.width ?? null,
+    height: metadata.height ?? null,
+  };
+}));
+const unregisteredLogos = logoFiles.filter(({ filename }) => !registeredFilenames.has(filename));
 if (unregisteredLogos.length) {
-  console.warn(
-    `Avatar files warning: ${unregisteredLogos.length} WebP files have no registry entry and will be shown without ID metadata:\n${unregisteredLogos
+  throw new Error(
+    `Avatar registry error: ${unregisteredLogos.length} WebP files have no registry entry:\n${unregisteredLogos
       .map(({ file }) => `- ${file}`)
       .join('\n')}`,
   );
 }
-const logos: Logo[] = (
-  await Promise.all(
-    logoFiles.map(async ({ file, name, registryEntry, src }) => {
-      const metadata = await sharp(join(process.cwd(), 'avatars', file)).metadata();
-      return {
-        id: registryEntry?.id ?? null,
-        icpcId: registryEntry && /^\d+$/.test(registryEntry.id) ? registryEntry.id : null,
-        name,
-        src,
-        file,
-        width: metadata.width ?? null,
-        height: metadata.height ?? null,
-      };
-    }),
-  )
-).sort((left, right) => collator.compare(left.name, right.name));
+const logoByFilename = new Map(logoFiles.map(logo => [logo.filename, logo]));
+const logos: Logo[] = avatarRegistry.flatMap((entry) => {
+  const logo = logoByFilename.get(entry.filename);
+  if (!logo) return [];
+  return [{
+    id: entry.id,
+    icpcId: /^\d+$/.test(entry.id) ? entry.id : null,
+    name: entry.name,
+    src: logo.src,
+    file: logo.file,
+    width: logo.width,
+    height: logo.height,
+  }];
+}).sort((left, right) => collator.compare(left.name, right.name));
 
-const logoIds = new Set(logos.flatMap(({ id }) => id ? [id] : []));
-const missingLogos = avatarRegistry.filter(({ id }) => !logoIds.has(id));
+const missingLogos = avatarRegistry.filter(({ filename }) => !logoByFilename.has(filename));
 if (missingLogos.length) {
   console.warn(
     `Avatar registry warning: ${missingLogos.length} entries have no WebP and will not be shown:\n${missingLogos
