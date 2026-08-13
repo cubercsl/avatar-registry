@@ -1936,6 +1936,7 @@ __metadata:
     "@types/react": "npm:^19.2.17"
     "@types/react-dom": "npm:^19.2.3"
     astro: "npm:^7.0.4"
+    csv-parser: "npm:^3.2.1"
     lucide-react: "npm:^1.22.0"
     p-queue: "npm:^9.0.0"
     react: "npm:^19.2.7"
@@ -2159,6 +2160,15 @@ __metadata:
   version: 3.2.3
   resolution: "csstype@npm:3.2.3"
   checksum: 10c0/cd29c51e70fa822f1cecd8641a1445bed7063697469d35633b516e60fe8c1bde04b08f6c5b6022136bb669b64c63d4173af54864510fbb4ee23281801841a3ce
+  languageName: node
+  linkType: hard
+
+"csv-parser@npm:^3.2.1":
+  version: 3.2.1
+  resolution: "csv-parser@npm:3.2.1"
+  bin:
+    csv-parser: bin/csv-parser
+  checksum: 10c0/470ad21c9eba57ef24b56b08b2b7d376724987f3774deaaa32b8553620ee861e31f24ee06b456a33bcae37b8c103c70b2de71e6cf04f4cdb856e90ea56e649c2
   languageName: node
   linkType: hard
 

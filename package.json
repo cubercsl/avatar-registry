@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@hydrooj/register": "^1.0.4",
+    "csv-parser": "^3.2.1",
     "lucide-react": "^1.22.0",
     "p-queue": "^9.0.0",
     "react": "^19.2.7",
