@@ -11,56 +11,21 @@ const collator = new Intl.Collator('zh-Hans-CN', {
   sensitivity: 'base',
 });
 
-const avatarRegistry = loadAvatarRegistry();
-const registeredFilenames = new Set(avatarRegistry.map(entry => entry.filename));
-const logoFiles = await Promise.all(fs
-  .readdirSync('avatars', { withFileTypes: true })
-  .filter(entry => entry.isFile() && entry.name.endsWith('.webp'))
-  .map(async ({ name: file }) => {
-    const filename = file.replace(/\.webp$/i, '');
-    const contents = await fs.promises.readFile(join(process.cwd(), 'avatars', file));
-    const metadata = await sharp(contents).metadata();
-    const buildHash = createHash('sha256').update(contents).digest('hex').slice(0, 12);
-    return {
-      file,
-      filename,
-      src: `/avatars/${encodeURIComponent(file)}?build=${buildHash}`,
-      width: metadata.width ?? null,
-      height: metadata.height ?? null,
-    };
-  }));
-const unregisteredLogos = logoFiles.filter(({ filename }) => !registeredFilenames.has(filename));
-if (unregisteredLogos.length) {
-  throw new Error(
-    `Avatar registry error: ${unregisteredLogos.length} WebP files have no registry entry:\n${unregisteredLogos
-      .map(({ file }) => `- ${file}`)
-      .join('\n')}`,
-  );
-}
-const logoByFilename = new Map(logoFiles.map(logo => [logo.filename, logo]));
-const logos: Logo[] = avatarRegistry.flatMap((entry) => {
-  const logo = logoByFilename.get(entry.filename);
-  if (!logo) return [];
-  return [{
-    id: entry.id,
-    icpcId: /^\d+$/.test(entry.id) ? entry.id : null,
-    name: entry.name,
-    searchNames: [entry.filename, entry.name, entry.englishName].filter(Boolean),
-    src: logo.src,
-    file: logo.file,
-    width: logo.width,
-    height: logo.height,
-  }];
-}).sort((left, right) => collator.compare(left.name, right.name));
-
-const missingLogos = avatarRegistry.filter(({ filename }) => !logoByFilename.has(filename));
-if (missingLogos.length) {
-  console.warn(
-    `Avatar registry warning: ${missingLogos.length} entries have no WebP and will not be shown:\n${missingLogos
-      .map(({ id, name }) => `- ${id}: ${name}`)
-      .join('\n')}`,
-  );
-}
+const registry = loadAvatarRegistry();
+const logos: Logo[] = (await Promise.all(fs.readdirSync('avatars').map(async (file) => {
+  const filename = file.replace(/\.webp$/i, '');
+  const aliases = registry.get(filename) ?? [];
+  const contents = await fs.promises.readFile(join(process.cwd(), 'avatars', file));
+  const { width = null, height = null } = await sharp(contents).metadata();
+  return {
+    name: aliases[0] ?? filename,
+    aliases,
+    src: `/avatars/${encodeURIComponent(file)}?build=${createHash('sha256').update(contents).digest('hex').slice(0, 12)}`,
+    file,
+    width,
+    height,
+  };
+}))).sort((left, right) => collator.compare(left.name, right.name));
 ---
 
 <!doctype html>
