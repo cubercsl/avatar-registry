@@ -20,7 +20,7 @@ const logos: Logo[] = (await Promise.all(fs.readdirSync('avatars').map(async (fi
   return {
     name: aliases[0] ?? filename,
     aliases,
-    src: `/avatars/${encodeURIComponent(file)}?build=${createHash('sha256').update(contents).digest('hex').slice(0, 12)}`,
+    src: `/org/${encodeURIComponent(file)}?build=${createHash('sha256').update(contents).digest('hex').slice(0, 12)}`,
     file,
     width,
     height,
